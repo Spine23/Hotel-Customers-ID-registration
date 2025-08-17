@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Hotel ID Capture</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#0ea5e9">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .card { @apply rounded-2xl shadow-xl p-4 bg-white; }
+    .btn { @apply px-4 py-3 rounded-xl font-semibold shadow hover:shadow-md transition active:scale-95; }
+    .btn-primary { @apply bg-sky-600 text-white; }
+    .btn-secondary { @apply bg-slate-100; }
+    .pill { @apply text-xs px-2 py-1 rounded-full bg-slate-100; }
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-b from-sky-50 to-blue-100">
+  <div class="max-w-3xl mx-auto p-4 md:p-8 space-y-6">
+    <header class="flex items-center justify-between">
+      <h1 class="text-2xl md:text-3xl font-extrabold tracking-tight">🏨 Hotel ID Capture</h1>
+      <a href="/security" class="pill">Security Dashboard →</a>
+    </header>
+
+    <section id="setup" class="card">
+      <h2 class="text-lg font-bold mb-2">Hotel Setup</h2>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <input id="hotelName" class="border rounded-xl p-3" placeholder="Hotel Owner Name">
+        <input id="hotelCode" class="border rounded-xl p-3" placeholder="Hotel Owner Code">
+        <button id="saveSetup" class="btn btn-primary">Save & Continue</button>
+      </div>
+      <p class="text-xs text-slate-500 mt-2">Saved locally on this device.</p>
+    </section>
+
+    <section id="capture" class="card hidden">
+      <div class="flex items-center justify-between mb-2">
+        <div>
+          <div id="hotelBadge" class="pill"></div>
+          <div id="todayBadge" class="pill mt-1"></div>
+        </div>
+        <div class="text-sm text-slate-600">Today: <span id="countToday">0</span> photos</div>
+      </div>
+      <div class="grid gap-4">
+        <video id="video" autoplay playsinline class="w-full rounded-xl bg-black"></video>
+        <canvas id="canvas" class="hidden"></canvas>
+        <div class="flex gap-3">
+          <button id="btnCapture" class="btn btn-primary flex-1">📸 Capture</button>
+          <button id="btnSend" class="btn btn-secondary">Send Daily Report</button>
+        </div>
+        <div id="gallery" class="grid grid-cols-3 md:grid-cols-5 gap-2"></div>
+      </div>
+    </section>
+
+    <section id="status" class="text-sm text-slate-600"></section>
+  </div>
+
+<script type="module">
+const $ = (sel)=>document.querySelector(sel);
+const state = {
+  settings: {name:'', code:''},
+  buffer: [], // {blob, dataUrl, overlayText, capturedAtISO}
+  reportId: null,
+};
+
+function fmtOverlay(d=new Date()){
+  const opts = { weekday:'long', day:'2-digit', month:'short', year:'numeric' };
+  let h = d.getHours(), m = d.getMinutes();
+  const ampm = h>=12?'PM':'AM';
+  h = h%12 || 12;
+  const hh = String(h);
+  const mm = String(m).padStart(2,'0');
+  const dt = d.toLocaleDateString(undefined, opts).replace(',', '');
+  const parts = dt.split(' '); // e.g., Friday 15 Aug 2025
+  // Ensure overlayText "HH:MM AM/PM – Day, DD MMM YYYY"
+  const day = parts[0];
+  const dd = parts[1];
+  const mon = parts[2];
+  const yyyy = parts[3];
+  return `${hh}:${mm} ${ampm} – ${day}, ${dd} ${mon} ${yyyy}`;
+}
+function isoLocal(d=new Date()){ return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,19)+"Z"; }
+function todayYMD(d=new Date()){
+  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+
+function loadSettings(){
+  try{ state.settings = JSON.parse(localStorage.getItem('hotelSettings')||'{}'); }catch{}
+  if(state.settings?.name) $('#hotelName').value = state.settings.name;
+  if(state.settings?.code) $('#hotelCode').value = state.settings.code;
+  if(state.settings?.name && state.settings?.code){
+    $('#setup').classList.add('hidden');
+    $('#capture').classList.remove('hidden');
+    $('#hotelBadge').textContent = `${state.settings.name} (#${state.settings.code})`;
+  }
+  $('#todayBadge').textContent = todayYMD();
+}
+$('#saveSetup').onclick = ()=>{
+  const name = $('#hotelName').value.trim();
+  const code = $('#hotelCode').value.trim();
+  if(!name || !code){ alert('Enter hotel name and code'); return; }
+  state.settings = {name, code};
+  localStorage.setItem('hotelSettings', JSON.stringify(state.settings));
+  loadSettings();
+  initCamera();
+};
+
+async function initCamera(){
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio:false });
+    $('#video').srcObject = stream;
+  }catch(e){
+    $('#status').textContent = 'Camera error: ' + e.message;
+  }
+}
+function drawTimestampToCanvas(video){
+  const canvas = $('#canvas');
+  const w = video.videoWidth || 1280;
+  const h = video.videoHeight || 720;
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, w, h);
+  // stamp
+  const text = fmtOverlay(new Date());
+  const pad = 16;
+  ctx.font = 'bold 28px system-ui,Segoe UI,Roboto';
+  ctx.textBaseline = 'bottom';
+  const metrics = ctx.measureText(text);
+  const boxW = metrics.width + pad*2;
+  const boxH = 42;
+  ctx.globalAlpha = 0.6;
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(w - boxW - pad, h - boxH - pad, boxW, boxH);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(text, w - boxW, h - pad - 10);
+  return { canvas, overlayText: text };
+}
+function dataURLtoBlob(dataurl){
+  const arr = dataurl.split(',');
+  const mime = arr[0].match(/:(.*?);/)[1];
+  const bstr = atob(arr[1]); let n=bstr.length; const u8=new Uint8Array(n);
+  while(n--) u8[n]=bstr.charCodeAt(n);
+  return new Blob([u8], {type:mime});
+}
+function addThumb(src, overlay){
+  const el = document.createElement('div');
+  el.className = 'relative';
+  el.innerHTML = \`
+    <img src="\${src}" class="w-full h-24 object-cover rounded-lg border">
+    <span class="absolute bottom-1 right-1 bg-black/60 text-white text-[10px] px-1 rounded">\${overlay}</span>
+  \`;
+  $('#gallery').prepend(el);
+  $('#countToday').textContent = state.buffer.length;
+}
+
+$('#btnCapture').onclick = async ()=>{
+  const video = $('#video');
+  if(!video.srcObject){ await initCamera(); }
+  const { canvas, overlayText } = drawTimestampToCanvas(video);
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+  const blob = dataURLtoBlob(dataUrl);
+  state.buffer.push({ blob, dataUrl, overlayText, capturedAtISO: isoLocal(new Date()) });
+  addThumb(dataUrl, overlayText);
+};
+
+async function beginReport(){
+  const body = {
+    hotelCode: state.settings.code,
+    hotelName: state.settings.name,
+    reportDate: todayYMD()
+  };
+  const res = await fetch('/api/v1/reports/begin', {
+    method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+  });
+  const j = await res.json();
+  if(!res.ok){ throw new Error(j.error||'begin error'); }
+  state.reportId = j.reportId;
+  return j;
+}
+
+async function uploadOne(item){
+  const fd = new FormData();
+  fd.append('image', item.blob, 'id.jpg');
+  fd.append('reportId', state.reportId);
+  fd.append('hotelCode', state.settings.code);
+  fd.append('reportDate', todayYMD());
+  fd.append('capturedAtISO', item.capturedAtISO);
+  fd.append('overlayText', item.overlayText);
+  const r = await fetch('/api/v1/images', { method:'POST', body: fd });
+  const j = await r.json();
+  if(!r.ok) throw new Error(j.error||'upload error');
+  return j;
+}
+
+async function finalize(){
+  const r = await fetch('/api/v1/reports/finalize', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ reportId: state.reportId })
+  });
+  const j = await r.json();
+  if(!r.ok) throw new Error(j.error||'finalize error');
+  return j;
+}
+
+$('#btnSend').onclick = async ()=>{
+  if(state.buffer.length===0){ alert('No photos captured today'); return; }
+  $('#btnSend').disabled = true;
+  $('#status').textContent = 'Starting daily report...';
+  try{
+    await beginReport();
+    $('#status').textContent = 'Uploading images...';
+    for(let i=0;i<state.buffer.length;i++){
+      await uploadOne(state.buffer[i]);
+      $('#status').textContent = \`Uploaded \${i+1}/\${state.buffer.length}...\`;
+    }
+    const fin = await finalize();
+    $('#status').textContent = \`Daily report sent! Images: \${fin.totalCount}. Report ID: \${fin.reportId}\`;
+    // reset buffer
+    state.buffer = [];
+    $('#gallery').innerHTML='';
+    $('#countToday').textContent = '0';
+  }catch(e){
+    $('#status').textContent = 'Error: ' + e.message;
+    alert(e.message);
+  }finally{
+    $('#btnSend').disabled = false;
+  }
+};
+
+loadSettings();
+initCamera();
+</script>
+</body>
+</html>
